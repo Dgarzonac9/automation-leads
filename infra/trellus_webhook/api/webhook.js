@@ -1,9 +1,10 @@
-// v2 -- forzar redeploy tras evento de git perdido por Vercel.
 // Endpoint receptor del webhook de Trellus (POST al terminar cada llamada).
-// Fase de diagnóstico: valida el secreto y devuelve el payload recibido,
-// para confirmar el mapeo de campos (contact_id, summary, etc.) contra
-// Attio usando el botón "Test Webhook" de Trellus antes de escribir la
-// lógica real de sincronización.
+// Vincula la llamada con la Person en Attio por teléfono (target_number
+// == phone, ambos en E.164) -- no por contact_id, que es un ID interno
+// de Trellus sin relación con record_id de Attio (confirmado con el
+// payload de ejemplo de Trellus). Ver infra/trellus_webhook/lib/attio.js.
+
+import { recordCallSummary } from "../lib/attio.js";
 
 export default async function handler(req, res) {
   // Trellus dispara el webhook desde una extensión de Chrome (no un
@@ -30,8 +31,23 @@ export default async function handler(req, res) {
     return;
   }
 
-  const payload = req.body;
+  const payload = req.body || {};
   console.log("[trellus_webhook] payload recibido:", JSON.stringify(payload));
 
-  res.status(200).json({ received: true, echo: payload });
+  const { target_number: phone, summary } = payload;
+
+  if (!phone || !summary) {
+    console.log("[trellus_webhook] payload sin target_number o summary -- nada que registrar");
+    res.status(200).json({ received: true, skipped: "missing_phone_or_summary" });
+    return;
+  }
+
+  try {
+    const result = await recordCallSummary(phone, summary);
+    console.log("[trellus_webhook] resultado Attio:", JSON.stringify(result));
+    res.status(200).json({ received: true, attio: result });
+  } catch (err) {
+    console.error("[trellus_webhook] error al escribir en Attio:", err.message);
+    res.status(502).json({ received: true, error: "attio_write_failed", detail: err.message });
+  }
 }

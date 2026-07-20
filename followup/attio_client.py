@@ -109,6 +109,74 @@ def fetch_pending_follow_ups(list_id=COBOL_LATAM_LIST_ID, page_size=50):
     return pending
 
 
+def find_person_by_phone(phone, list_id=COBOL_LATAM_LIST_ID):
+    """Busca la Person + su entrada en la lista por teléfono E.164 (así
+    llega target_number en el webhook de Trellus). Devuelve
+    (record_id, entry_id) o (None, None) si no hay match. No se puede
+    vincular por contact_id de Trellus: ese ID es interno de Trellus,
+    no corresponde al record_id de Attio (confirmado con un payload de
+    prueba: contact_id no tenía formato de UUID de Attio)."""
+    r = requests.post(
+        f"{BASE_URL}/objects/people/records/query",
+        headers=_headers(),
+        json={"filter": {"phone_numbers": {"original_phone_number": phone}}},
+        timeout=30,
+    )
+    r.raise_for_status()
+    records = r.json().get("data", [])
+    if not records:
+        return None, None
+    record_id = records[0]["id"]["record_id"]
+
+    offset = 0
+    while True:
+        r = requests.post(
+            f"{BASE_URL}/lists/{list_id}/entries/query",
+            headers=_headers(),
+            json={"filter": {"parent_record_id": record_id}, "limit": 50, "offset": offset},
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        for entry in data:
+            if entry.get("parent_record_id") == record_id:
+                return record_id, entry["id"]["entry_id"]
+        if len(data) < 50:
+            break
+        offset += 50
+    return record_id, None
+
+
+def record_call_summary(phone, summary, list_id=COBOL_LATAM_LIST_ID):
+    """Punto de entrada del webhook de Trellus: busca la Person por
+    teléfono, escribe el resumen en nota_llamada, mueve el stage a
+    'Llamada realizada' y deja follow_up_status en 'Pendiente' para que
+    followup/main.py la recoja. Devuelve dict con el resultado para
+    que el endpoint pueda loguear/responder algo útil."""
+    record_id, entry_id = find_person_by_phone(phone, list_id=list_id)
+    if not entry_id:
+        return {"matched": False, "record_id": record_id, "entry_id": None}
+
+    payload = {
+        "data": {
+            "entry_values": {
+                ATTR_NOTA_LLAMADA: [{"value": summary}],
+                ATTR_LEAD_STAGE: [{"value": STAGE_LLAMADA_REALIZADA}],
+                ATTR_FOLLOW_UP_STATUS: [{"value": FOLLOW_UP_PENDIENTE}],
+            }
+        }
+    }
+    r = requests.patch(
+        f"{BASE_URL}/lists/{list_id}/entries/{entry_id}",
+        headers=_headers(),
+        json=payload,
+        timeout=30,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(f"no se pudo registrar resumen de llamada en {entry_id}: {r.status_code} {r.text[:500]}")
+    return {"matched": True, "record_id": record_id, "entry_id": entry_id}
+
+
 def mark_follow_up_status(entry_id, status, list_id=COBOL_LATAM_LIST_ID):
     """Actualiza follow_up_status en la entrada de lista -- es lo que
     hace idempotente al proceso: una corrida repetida del script no
