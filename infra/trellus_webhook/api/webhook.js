@@ -1,3 +1,4 @@
+// v2 -- forzar redeploy tras evento de git perdido por Vercel.
 // Endpoint receptor del webhook de Trellus (POST al terminar cada llamada).
 // Fase de diagnóstico: valida el secreto y devuelve el payload recibido,
 // para confirmar el mapeo de campos (contact_id, summary, etc.) contra
