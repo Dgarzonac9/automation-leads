@@ -2,17 +2,16 @@
 // followup/attio_client.py (Python) -- Vercel no puede invocar Python
 // desde esta función Node, así que la misma lógica de vinculación por
 // teléfono vive acá también. Si cambia el contrato de campos, actualizar
-// ambos lados.
+// ambos lados. Nombres de atributo confirmados vía GET
+// /lists/{id}/attributes contra la lista real (no placeholders).
 
 const BASE_URL = "https://api.attio.com/v2";
 const COBOL_LATAM_LIST_ID = "35c7dfa0-0f6f-41a2-a505-94e50535600d";
 
-const STAGE_LLAMADA_REALIZADA = "Llamada realizada";
-const FOLLOW_UP_PENDIENTE = "Pendiente";
-
-const ATTR_LEAD_STAGE = "lead_stage";
-const ATTR_NOTA_LLAMADA = "nota_llamada";
-const ATTR_FOLLOW_UP_STATUS = "follow_up_status";
+const ATTR_CONTACTADO = "contactado";
+const ATTR_NOTA_LLAMADA = "summary_llamada";
+const ATTR_INTENTOS = "intentos";
+const ATTR_RAW_PAYLOAD = "trellus_raw_payload";
 
 function headers() {
   return {
@@ -65,29 +64,49 @@ async function findPersonByPhone(phone, listId = COBOL_LATAM_LIST_ID) {
   return { recordId, entryId: null };
 }
 
-async function recordCallSummary(phone, summary, listId = COBOL_LATAM_LIST_ID) {
+async function getCurrentAttempts(listId, entryId) {
+  const res = await fetch(`${BASE_URL}/lists/${listId}/entries/${entryId}`, {
+    method: "GET",
+    headers: headers(),
+  });
+  if (!res.ok) {
+    // No bloquear el registro de la llamada por esto -- si no se puede leer
+    // el valor actual, se asume 0 y se pisa (mejor perder precisión del
+    // contador que perder el summary_llamada de la llamada real).
+    return 0;
+  }
+  const data = await res.json();
+  const values = (data.data?.entry_values?.[ATTR_INTENTOS]) || [];
+  return values[0]?.value ?? 0;
+}
+
+async function recordCallSummary(phone, summary, rawPayload, listId = COBOL_LATAM_LIST_ID) {
   const { recordId, entryId } = await findPersonByPhone(phone, listId);
   if (!entryId) {
     return { matched: false, recordId, entryId: null };
   }
 
+  const currentAttempts = await getCurrentAttempts(listId, entryId);
+  const rawPayloadText = rawPayload !== undefined ? JSON.stringify(rawPayload) : undefined;
+
+  const entryValues = {
+    [ATTR_NOTA_LLAMADA]: [{ value: summary }],
+    [ATTR_CONTACTADO]: [{ value: true }],
+    [ATTR_INTENTOS]: [{ value: currentAttempts + 1 }],
+  };
+  if (rawPayloadText !== undefined) {
+    entryValues[ATTR_RAW_PAYLOAD] = [{ value: rawPayloadText }];
+  }
+
   const patchRes = await fetch(`${BASE_URL}/lists/${listId}/entries/${entryId}`, {
     method: "PATCH",
     headers: headers(),
-    body: JSON.stringify({
-      data: {
-        entry_values: {
-          [ATTR_NOTA_LLAMADA]: [{ value: summary }],
-          [ATTR_LEAD_STAGE]: [{ value: STAGE_LLAMADA_REALIZADA }],
-          [ATTR_FOLLOW_UP_STATUS]: [{ value: FOLLOW_UP_PENDIENTE }],
-        },
-      },
-    }),
+    body: JSON.stringify({ data: { entry_values: entryValues } }),
   });
   if (!patchRes.ok) {
     throw new Error(`attio entry update failed: ${patchRes.status} ${await patchRes.text()}`);
   }
-  return { matched: true, recordId, entryId };
+  return { matched: true, recordId, entryId, attempts: currentAttempts + 1 };
 }
 
 export { recordCallSummary, findPersonByPhone };
